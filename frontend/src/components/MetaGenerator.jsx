@@ -273,6 +273,42 @@ export default function MetaGenerator() {
     toast.info("Stopping after in-flight images finish…");
   };
 
+  const getModel = () => (provider === "gemini" ? geminiModel : orModel.trim());
+
+  const retryImage = async (id) => {
+    if (!parsedKeys.length) return toast.error("Add at least one API key.");
+    const model = getModel();
+    const idx = imagesRef.current.findIndex((i) => i.id === id);
+    await processOne(id, parsedKeys, (idx < 0 ? 0 : idx) % parsedKeys.length, model);
+  };
+
+  const retryFailed = async () => {
+    if (!parsedKeys.length) return toast.error("Add at least one API key.");
+    const model = getModel();
+    const ids = imagesRef.current
+      .filter((i) => i.status === "error")
+      .map((i) => i.id);
+    if (!ids.length) return;
+
+    stopRef.current = false;
+    setProcessing(true);
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        if (stopRef.current) return;
+        const pos = cursor++;
+        if (pos >= ids.length) return;
+        const gid = ids[pos];
+        const idx = imagesRef.current.findIndex((i) => i.id === gid);
+        await processOne(gid, parsedKeys, (idx < 0 ? pos : idx) % parsedKeys.length, model);
+      }
+    };
+    const n = Math.max(1, Math.min(10, Number(concurrency) || 1));
+    await Promise.all(Array.from({ length: n }, worker));
+    setProcessing(false);
+    toast.success("Retry finished.");
+  };
+
   const results = useMemo(
     () => images.filter((i) => i.status === "done"),
     [images]
@@ -581,6 +617,16 @@ export default function MetaGenerator() {
             <span className="text-[#71717A]">{stats.total} total</span>
           </div>
           <div className="flex items-center gap-3">
+            {stats.error > 0 && !processing && (
+              <button
+                data-testid="retry-failed-button"
+                onClick={retryFailed}
+                className="flex items-center gap-1.5 text-[#FACC15] hover:text-white text-xs font-mono-tech transition-colors"
+                style={{ transition: "color .15s ease" }}
+              >
+                <ArrowClockwise size={13} /> retry {stats.error} failed
+              </button>
+            )}
             {images.length > 0 && !processing && (
               <button
                 data-testid="clear-button"
@@ -636,7 +682,12 @@ export default function MetaGenerator() {
           ) : (
             <div className="max-h-[560px] overflow-y-auto">
               {images.map((img, idx) => (
-                <ResultRow key={img.id} img={img} index={idx + 1} />
+                <ResultRow
+                  key={img.id}
+                  img={img}
+                  index={idx + 1}
+                  onRetry={retryImage}
+                />
               ))}
             </div>
           )}
@@ -682,7 +733,7 @@ function StatusBadge({ status, error }) {
   );
 }
 
-function ResultRow({ img, index }) {
+function ResultRow({ img, index, onRetry }) {
   const isProc = img.status === "processing";
   return (
     <div
@@ -704,9 +755,20 @@ function ResultRow({ img, index }) {
           <StatusBadge status={img.status} error={img.error} />
         </div>
         {img.status === "error" && (
-          <div className="mt-1 text-[10px] text-[#F87171]/70 line-clamp-2 break-all">
-            {img.error}
-          </div>
+          <>
+            <div className="mt-1 text-[10px] text-[#F87171]/70 line-clamp-2 break-all">
+              {img.error}
+            </div>
+            <button
+              data-testid={`retry-button-${index}`}
+              onClick={() => onRetry?.(img.id)}
+              disabled={isProc}
+              className="mt-1.5 flex items-center gap-1 text-[10px] text-[#FACC15] hover:text-white border border-white/10 hover:border-white/40 px-1.5 py-0.5 transition-colors disabled:opacity-40"
+              style={{ transition: "color .15s ease, border-color .15s ease" }}
+            >
+              <ArrowClockwise size={11} /> Retry
+            </button>
+          </>
         )}
       </div>
       <div className="bg-[#0B0B0D] px-3 py-2.5 text-xs text-[#E4E4E7]">
