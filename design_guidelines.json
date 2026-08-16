@@ -1,0 +1,102 @@
+{
+  "theme_strategy": {
+    "theme": "Dark Mode Only",
+    "archetype": "Swiss & High-Contrast (Swiss Brutalist for Developer Tools)",
+    "vibe": "Sleek, minimalist, technical, fast, and authoritative."
+  },
+  "typography": {
+    "fonts": {
+      "headings": "Chivo",
+      "body": "IBM Plex Sans",
+      "monospace": "IBM Plex Mono"
+    },
+    "rules": {
+      "headings": "Tight letter spacing (tracking-tight), use font-light or font-black for extreme contrast, never use generic 'Inter'.",
+      "labels": "Uppercase, tiny (text-xs), wide spacing (tracking-[0.2em]).",
+      "data_tables": "Use IBM Plex Mono for table data (Filename, Status, API Keys input) to enforce a technical, code-editor feel.",
+      "hierarchy_gap": "Maximum heading size text-4xl. Do not exceed for this utility app."
+    }
+  },
+  "colors": {
+    "background": {
+      "main": "#09090B",
+      "surface": "#18181B",
+      "elevated": "#27272A"
+    },
+    "text": {
+      "primary": "#FAFAFA",
+      "secondary": "#A1A1AA",
+      "muted": "#71717A"
+    },
+    "accents": {
+      "primary": "#FFFFFF",
+      "primary_foreground": "#09090B",
+      "success": "#4ADE80",
+      "warning": "#FACC15",
+      "destructive": "#F87171",
+      "border": "rgba(255, 255, 255, 0.1)"
+    },
+    "rules": {
+      "contrast": "Ensure pure monochrome emphasis with quiet chrome. Colors exist only to indicate state (Status success/error).",
+      "borders": "Use 1px border-white/10 everywhere instead of shadows. No soft UI shadows."
+    }
+  },
+  "visual_enhancers": {
+    "surfaces": "Use the 'Grid Borders (Technical Look)'. Expose the skeleton. Containers should have border-collapse style layouts.",
+    "glassmorphism": "Not recommended for this data-heavy utility app. Use Solid flat backgrounds with crisp 1px borders.",
+    "hover_states": "High contrast inversion. e.g., Hovering on a border might turn it from white/10 to white/30."
+  },
+  "components": {
+    "buttons": "Sharp corners (rounded-none or max rounded-sm). Primary button must be Stark White background with Black text. Stop button must be stark Red.",
+    "inputs": "API Keys Textarea must look like a terminal/code editor (IBM Plex Mono, flat dark bg, 1px border). No resize handle.",
+    "table": "Data-table-first layout. border-collapse, dense padding (p-2), mono font for status and filename. No generic Shadcn cards—use flat rectangular structures.",
+    "progress_bar": "Minimalist 1px or 2px high line. No chunky rounded progress bars.",
+    "panels": "Card stacks with surface elevation—layered background steps instead of drop shadows."
+  },
+  "grids_and_layouts": {
+    "page_structure": "Top heavy control panel (Bento grid style) and bottom-heavy data table.",
+    "bento_grid": "Control Panel should use a grid-cols-1 md:grid-cols-12 system. API Keys (col-span-12 lg:col-span-4), Options (col-span-12 md:col-span-6 lg:col-span-4), Actions (col-span-12 md:col-span-6 lg:col-span-4).",
+    "spacing": "Dense inside tables (gap-2, p-2) but generous between major sections (py-12).",
+    "alignment": "Strict left alignment for all labels, inputs, and tabular data."
+  },
+  "motion": {
+    "micro_interactions": "Subtle row highlight when processing. Processing state indicator (e.g., pulsing dot or mono spinning text).",
+    "transitions": "Use specific properties: transition: background-color 0.15s ease, border-color 0.15s ease. NO transition: all."
+  },
+  "accessibility": {
+    "contrast": "Text must meet APCA standards. Light text on dark backgrounds.",
+    "focus": "focus:ring-1 focus:ring-white focus:ring-offset-1 focus:ring-offset-black.",
+    "testing": "All interactive elements MUST include data-testid attribute (e.g., data-testid='start-processing-button')."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1714548529197-537c1f0b6aa7?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODR8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMHRlY2huaWNhbCUyMGdyaWQlMjB0ZXh0dXJlJTIwZGFya3xlbnwwfHx8fDE3ODY4NzYxODl8MA&ixlib=rb-4.1.0&q=85",
+        "category": "Empty State Background",
+        "description": "Abstract technical grid texture to be used at very low opacity (e.g., 5-10%) as a background for the empty state before a folder is selected."
+      }
+    ],
+    "icons": "Use Phosphor Icons (@phosphor-icons/react) for a technical, crisp look suitable for dense dashboards."
+  },
+  "3d_libraries": {},
+  "instructions_to_main_agent": [
+    "Install required font families: Chivo, IBM Plex Sans, IBM Plex Mono (e.g. via Google Fonts in index.html).",
+    "Install Phosphor Icons: yarn add @phosphor-icons/react",
+    "Build a single-page dashboard layout. Divide into Top Control Panel and Bottom Results Table.",
+    "API Keys textarea should accept multiple lines and look like a code block.",
+    "The Results Table must update live. Use a clean border-collapse design.",
+    "Implement the 'Very simple options interface' requirement by using collapsible sections (e.g. Radix Accordion) for Advanced Prompt Settings.",
+    "Follow the Dark Mode Only theme. Use Tailwind classes like bg-[#09090B] and text-[#FAFAFA] or override globals in CSS.",
+    "DO NOT use Card wrappers for everything. Use raw divs with border-white/10 to create a flat, technical grid look."
+  ],
+  "universal_guidelines": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid this.",
+    "Create depth through layered background colors (Surface elevation), NOT shadows in dark mode.",
+    "DO NOT use dark colors as gradients.",
+    "DO NOT apply universal transition (transition: all).",
+    "DO NOT center align the app container. Left-align text naturally.",
+    "Always use modern button styles (sharp corners for this technical tool) with interaction animations.",
+    "NEVER use emoji characters for icons. Use Phosphor Icons.",
+    "Every interaction needs micro-animations - hover states, transitions."
+  ]
+}
