@@ -44,6 +44,7 @@ import {
   pickDirectoryImages,
   moveToDone,
   supportsFileSystemAccess,
+  DONE_FOLDER,
 } from "@/lib/fsUtils";
 import { buildCSV, buildTXT, downloadFile } from "@/lib/exporters";
 
@@ -84,6 +85,8 @@ export default function MetaGenerator() {
   const stopRef = useRef(false);
   const imagesRef = useRef(images);
   const uploadInputRef = useRef(null);
+  const doneMapRef = useRef({});
+  const csvWriteChain = useRef(Promise.resolve());
 
   useEffect(() => {
     imagesRef.current = images;
@@ -139,6 +142,31 @@ export default function MetaGenerator() {
   const updateImage = (id, patch) =>
     setImages((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
 
+  // Serialized live-write of metadata.csv into the "meta done" folder.
+  const writeDoneCSV = () => {
+    if (!dirHandleRef.current) return; // folder mode only
+    const cat = category === "none" ? "" : category;
+    csvWriteChain.current = csvWriteChain.current.then(async () => {
+      try {
+        const ordered = imagesRef.current
+          .filter((i) => doneMapRef.current[i.id])
+          .map((i) => doneMapRef.current[i.id]);
+        if (!ordered.length) return;
+        const csv = buildCSV(ordered, cat);
+        const doneDir = await dirHandleRef.current.getDirectoryHandle(
+          DONE_FOLDER,
+          { create: true }
+        );
+        const fh = await doneDir.getFileHandle("metadata.csv", { create: true });
+        const w = await fh.createWritable();
+        await w.write(csv);
+        await w.close();
+      } catch {
+        /* ignore transient write errors */
+      }
+    });
+  };
+
   const newRow = (name, extra) => ({
     id: crypto.randomUUID(),
     name,
@@ -154,6 +182,7 @@ export default function MetaGenerator() {
     try {
       const { dirHandle, files } = await pickDirectoryImages();
       dirHandleRef.current = dirHandle;
+      doneMapRef.current = {};
       setFolderName(dirHandle.name);
       setImages(files.map((f) => newRow(f.name, { handle: f.handle })));
       if (!files.length) toast.warning("No images found in that folder.");
@@ -166,6 +195,7 @@ export default function MetaGenerator() {
   const onUpload = (e) => {
     const list = Array.from(e.target.files || []).filter((f) => isImageName(f.name));
     dirHandleRef.current = null;
+    doneMapRef.current = {};
     setFolderName(list.length ? "Uploaded selection" : "");
     setImages(list.map((f) => newRow(f.name, { file: f })));
     if (list.length) toast.success(`Loaded ${list.length} image(s). (Auto-move disabled in upload mode.)`);
@@ -181,33 +211,29 @@ export default function MetaGenerator() {
       const file = img.handle ? await img.handle.getFile() : img.file;
       const { base64, dataUrl, mimeType } = await fileToDownscaledImage(file);
 
-      let meta;
-      try {
-        meta = await generateMetadata({
-          provider,
-          model,
-          apiKey: keys[keyIndex],
-          base64,
-          dataUrl,
-          mimeType,
-          prompt,
-        });
-      } catch (e1) {
-        if (keys.length > 1) {
-          const alt = (keyIndex + 1) % keys.length;
+      // Try every key in rotation, starting at keyIndex, until one succeeds.
+      let meta = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt < keys.length; attempt++) {
+        if (stopRef.current) throw new Error("Stopped");
+        const k = keys[(keyIndex + attempt) % keys.length];
+        try {
           meta = await generateMetadata({
             provider,
             model,
-            apiKey: keys[alt],
+            apiKey: k,
             base64,
             dataUrl,
             mimeType,
             prompt,
           });
-        } else {
-          throw e1;
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
         }
       }
+      if (!meta) throw lastErr || new Error("All API keys failed for this image");
 
       if (img.handle && dirHandleRef.current) {
         try {
@@ -223,6 +249,15 @@ export default function MetaGenerator() {
         description: meta.description,
         keywords: meta.keywords,
       });
+
+      // Live-append to the CSV inside the "meta done" folder (folder mode only).
+      doneMapRef.current[id] = {
+        name: img.name,
+        title: meta.title,
+        description: meta.description,
+        keywords: meta.keywords,
+      };
+      writeDoneCSV();
     } catch (e) {
       updateImage(id, { status: "error", error: e.message || String(e) });
     }
@@ -333,6 +368,7 @@ export default function MetaGenerator() {
     setImages([]);
     setFolderName("");
     dirHandleRef.current = null;
+    doneMapRef.current = {};
   };
 
   return (
