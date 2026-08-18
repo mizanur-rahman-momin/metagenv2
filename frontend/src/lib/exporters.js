@@ -3,6 +3,29 @@ function csvField(v) {
   return `"${s.replace(/"/g, '""')}"`;
 }
 
+// Extract the first (quoted) field of a CSV data line — used to read the
+// Filename column from an existing metadata.csv for append/dedupe.
+export function firstCsvField(line) {
+  if (!line) return "";
+  if (line[0] !== '"') return line.split(",")[0];
+  let i = 1;
+  let out = "";
+  while (i < line.length) {
+    const c = line[i];
+    if (c === '"') {
+      if (line[i + 1] === '"') {
+        out += '"';
+        i += 2;
+        continue;
+      }
+      break;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 // Adobe Stock official CSV: Filename, Title, Keywords, Category, Releases
 export function buildCSV(rows, category = "") {
   const header = "Filename,Title,Keywords,Category,Releases";

@@ -46,7 +46,7 @@ import {
   supportsFileSystemAccess,
   DONE_FOLDER,
 } from "@/lib/fsUtils";
-import { buildCSV, buildTXT, downloadFile } from "@/lib/exporters";
+import { buildCSV, buildTXT, downloadFile, firstCsvField } from "@/lib/exporters";
 
 const GEMINI_MODELS = [
   { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
@@ -149,23 +149,53 @@ export default function MetaGenerator() {
     setImages((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
 
   // Serialized live-write of metadata.csv into the "meta done" folder.
+  // Reads any existing file first and APPENDS new rows (dedupe by filename)
+  // so results survive page reloads instead of being overwritten.
   const writeDoneCSV = () => {
     if (!dirHandleRef.current) return; // folder mode only
     const cat = category === "none" ? "" : category;
     csvWriteChain.current = csvWriteChain.current.then(async () => {
       try {
-        const ordered = imagesRef.current
-          .filter((i) => doneMapRef.current[i.id])
-          .map((i) => doneMapRef.current[i.id]);
-        if (!ordered.length) return;
-        const csv = buildCSV(ordered, cat);
         const doneDir = await dirHandleRef.current.getDirectoryHandle(
           DONE_FOLDER,
           { create: true }
         );
+
+        // Read existing metadata.csv (if any) and keep its rows as-is.
+        let headerLine = "Filename,Title,Keywords,Category,Releases";
+        let existingLines = [];
+        const existingNames = new Set();
+        try {
+          const fh0 = await doneDir.getFileHandle("metadata.csv");
+          const text = await (await fh0.getFile()).text();
+          const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
+          if (lines.length) {
+            headerLine = lines[0];
+            existingLines = lines.slice(1);
+            for (const l of existingLines) {
+              const nm = firstCsvField(l);
+              if (nm) existingNames.add(nm);
+            }
+          }
+        } catch {
+          /* no existing file yet */
+        }
+
+        // Only append session rows whose filename isn't already in the file.
+        const ordered = imagesRef.current
+          .filter((i) => doneMapRef.current[i.id])
+          .map((i) => doneMapRef.current[i.id]);
+        const newRows = ordered.filter((r) => !existingNames.has(r.name));
+        if (!newRows.length && existingLines.length) return;
+
+        const newDataLines = buildCSV(newRows, cat).split("\r\n").slice(1);
+        const content = [headerLine, ...existingLines, ...newDataLines].join(
+          "\r\n"
+        );
+
         const fh = await doneDir.getFileHandle("metadata.csv", { create: true });
         const w = await fh.createWritable();
-        await w.write(csv);
+        await w.write(content);
         await w.close();
       } catch {
         /* ignore transient write errors */
