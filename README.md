@@ -36,3 +36,9 @@ One Vercel project: FastAPI serves `/api/*` and the built React app from `fronte
 - `MONGO_URL` / `DB_NAME` are optional. Without them `/api/status` returns `[]`.
 
 Deploy with `vercel` or by connecting the repository in the Vercel dashboard.
+
+Project settings (required for the single-project layout):
+
+- **Root Directory**: leave empty so Vercel builds from the repository root; the build command must be able to `cd frontend`, and `app.py`/`requirements.txt` must be visible.
+- **Build Command**: keep it empty so `vercel.json` drives the build.
+- **Framework Preset**: `FastAPI`.
