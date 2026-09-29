@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd frontend && corepack yarn install --frozen-lockfile && GENERATE_SOURCEMAP=false corepack yarn build",
+  "functions": {
+    "app.py": {
+      "maxDuration": 10,
+      "excludeFiles": "{frontend/node_modules/**,frontend/src/**,frontend/public/**,tests/**,memory/**,test_reports/**,.emergent/**,design_guidelines.json,test_result.md}"
+    }
+  }
+}
