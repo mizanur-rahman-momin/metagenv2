@@ -31,7 +31,7 @@ uvicorn backend.server:app --reload
 
 One Vercel project: FastAPI serves `/api/*` and the built React app from `frontend/build`.
 
-- Build command (`vercel.json`): `cd frontend && corepack yarn install --frozen-lockfile && GENERATE_SOURCEMAP=false corepack yarn build`
+- Build command (`vercel.json`): `cd frontend && yarn install --frozen-lockfile && GENERATE_SOURCEMAP=false yarn build`. Vercel provides Yarn 1 automatically from the committed `frontend/yarn.lock`.
 - Python entrypoint: `app.py` (FastAPI preset). Python version from `.python-version` (3.12), Node from `.nvmrc` (22).
 - `MONGO_URL` / `DB_NAME` are optional. Without them `/api/status` returns `[]`.
 
