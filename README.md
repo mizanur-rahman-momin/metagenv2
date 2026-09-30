@@ -2,6 +2,22 @@
 
 Batch-generate Adobe Stock titles, descriptions and keywords with your own Gemini or OpenRouter API keys. The app runs entirely client-side; API keys stay in the browser's `localStorage`.
 
+## Model fallback & key health
+
+Requests run through an ordered model chain (primary + optional fallbacks) and a
+pool of API keys. On quota/limit errors the app cools the affected
+key-and-model pair, retries the same image on another healthy key, and moves to
+the next model when every key is throttled — returning to the primary once it
+recovers. Keys are health-tracked (healthy/cooling/degraded/invalid) in
+`localStorage` under hashed, masked labels only, with manual **Test keys** and
+reset controls. Content-policy blocks and invalid keys are not retried.
+
+A **patient retries** option (on by default) waits out short per-minute
+rate-limit cooldowns and then retries the same image instead of marking it
+`error` — useful on free tiers. It waits at most ~90s for a single cooldown and
+~5min total per image; longer daily-quota cooldowns are left to the **retry
+failed** action.
+
 ## Structure
 
 - `frontend/` — Create React App (craco) UI; the app lives in `src/components/MetaGenerator.jsx`.

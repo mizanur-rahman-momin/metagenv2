@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { toast } from "sonner";
 import {
   FolderOpen,
@@ -13,15 +13,20 @@ import {
   Warning,
   CircleNotch,
   Circle,
-  UploadSimple,
   Sparkle,
   ArrowClockwise,
+  ArrowCounterClockwise,
+  ShieldCheck,
+  Pulse,
+  XCircle,
 } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -38,7 +43,19 @@ import {
 
 import { DEFAULT_PROMPT } from "@/constants/prompt";
 import { ADOBE_CATEGORIES } from "@/lib/adobeCategories";
-import { generateMetadata } from "@/lib/providers";
+import { generateWithFailover, testKey, PING_TIMEOUT_MS } from "@/lib/providers";
+import { ErrorKind } from "@/lib/errorKinds";
+import {
+  getKey,
+  hashKey,
+  maskKey,
+  recordFailure,
+  recordSuccess,
+  resetAll as resetHealthAll,
+  resetKey as resetHealthKey,
+  setKeyEnabled,
+  snapshot as healthSnapshot,
+} from "@/lib/poolRegistry";
 import { fileToDownscaledImage, isImageName } from "@/lib/imageUtils";
 import {
   pickDirectoryImages,
@@ -48,16 +65,18 @@ import {
 } from "@/lib/fsUtils";
 import { buildCSV, buildTXT, downloadFile, firstCsvField } from "@/lib/exporters";
 
+// Real Generative Language API model IDs. Unavailable models are skipped
+// automatically by the failover engine, but keep this list maintained.
 const GEMINI_MODELS = [
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
-  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
-  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite" },
-  { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite" },
-  { value: "gemini-3.1-flash-lite-image", label: "Gemini 3.1 Flash Lite Image" },
   { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
+  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+  { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite" },
 ];
+
+const DEFAULT_PRIMARY_MODEL = "gemini-2.5-flash";
+const DEFAULT_FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash"];
 
 const LS_KEY = "stockmeta:settings";
 
@@ -74,10 +93,23 @@ export default function MetaGenerator() {
   const fsSupported = useMemo(supportsFileSystemAccess, []);
 
   const [provider, setProvider] = useState(saved.provider || "gemini");
-  const [geminiModel, setGeminiModel] = useState(
-    saved.geminiModel || "gemini-2.5-flash"
+  const [primaryModel, setPrimaryModel] = useState(
+    saved.primaryModel || saved.geminiModel || DEFAULT_PRIMARY_MODEL
+  );
+  const [fallbackModels, setFallbackModels] = useState(
+    Array.isArray(saved.fallbackModels) ? saved.fallbackModels : DEFAULT_FALLBACK_MODELS
   );
   const [orModel, setOrModel] = useState(saved.orModel || "openai/gpt-4o-mini");
+  const [orFallbackText, setOrFallbackText] = useState(
+    typeof saved.orFallbackModels === "string"
+      ? saved.orFallbackModels
+      : Array.isArray(saved.orFallbackModels)
+        ? saved.orFallbackModels.join(", ")
+        : ""
+  );
+  const [autoFallback, setAutoFallback] = useState(saved.autoFallback !== false);
+  const [autoProbe, setAutoProbe] = useState(saved.autoProbe !== false);
+  const [patientRetry, setPatientRetry] = useState(saved.patientRetry !== false);
   const [apiKeysText, setApiKeysText] = useState(saved.apiKeysText || "");
   const [concurrency, setConcurrency] = useState(saved.concurrency || 3);
   const [category, setCategory] = useState(saved.category || "none");
@@ -86,13 +118,18 @@ export default function MetaGenerator() {
   const [images, setImages] = useState([]);
   const [folderName, setFolderName] = useState("");
   const [processing, setProcessing] = useState(false);
+  const [healthVersion, setHealthVersion] = useState(0);
+  const [testing, setTesting] = useState(false);
 
   const dirHandleRef = useRef(null);
   const stopRef = useRef(false);
+  const abortRef = useRef(null);
   const imagesRef = useRef(images);
   const uploadInputRef = useRef(null);
   const doneMapRef = useRef({});
   const csvWriteChain = useRef(Promise.resolve());
+
+  const bumpHealth = useCallback(() => setHealthVersion((v) => v + 1), []);
 
   useEffect(() => {
     imagesRef.current = images;
@@ -110,15 +147,34 @@ export default function MetaGenerator() {
       LS_KEY,
       JSON.stringify({
         provider,
-        geminiModel,
+        primaryModel,
+        geminiModel: primaryModel, // legacy mirror
+        fallbackModels,
         orModel,
+        orFallbackModels: orFallbackText,
+        autoFallback,
+        autoProbe,
+        patientRetry,
         apiKeysText,
         concurrency,
         category,
         prompt,
       })
     );
-  }, [provider, geminiModel, orModel, apiKeysText, concurrency, category, prompt]);
+  }, [
+    provider,
+    primaryModel,
+    fallbackModels,
+    orModel,
+    orFallbackText,
+    autoFallback,
+    autoProbe,
+    patientRetry,
+    apiKeysText,
+    concurrency,
+    category,
+    prompt,
+  ]);
 
   const parsedKeys = useMemo(
     () =>
@@ -128,6 +184,33 @@ export default function MetaGenerator() {
         .filter(Boolean),
     [apiKeysText]
   );
+
+  // Deduped key pool with hashes + masked labels (raw keys never leave memory).
+  const keyEntries = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const key of parsedKeys) {
+      const hash = hashKey(key);
+      if (seen.has(hash)) continue;
+      seen.add(hash);
+      out.push({ hash, key, label: maskKey(key) });
+    }
+    return out;
+  }, [parsedKeys]);
+
+  // Ordered model chain = primary followed by enabled fallbacks.
+  const effectiveModels = useMemo(() => {
+    if (provider === "gemini") {
+      const list = autoFallback ? [primaryModel, ...fallbackModels] : [primaryModel];
+      return [...new Set(list.filter(Boolean))];
+    }
+    const fallbacks = orFallbackText
+      .split(/[\n,]+/)
+      .map((m) => m.trim())
+      .filter(Boolean);
+    const list = autoFallback ? [orModel.trim(), ...fallbacks] : [orModel.trim()];
+    return [...new Set(list.filter(Boolean))];
+  }, [provider, autoFallback, primaryModel, fallbackModels, orModel, orFallbackText]);
 
   const stats = useMemo(() => {
     const total = images.length;
@@ -211,6 +294,8 @@ export default function MetaGenerator() {
     description: "",
     keywords: [],
     error: "",
+    usedKey: "",
+    usedModel: "",
     ...extra,
   });
 
@@ -239,37 +324,27 @@ export default function MetaGenerator() {
     e.target.value = "";
   };
 
-  const processOne = async (id, keys, keyIndex, model) => {
+  const processOne = async (id, keys, models) => {
     const img = imagesRef.current.find((i) => i.id === id);
     if (!img) return;
-    updateImage(id, { status: "processing", error: "" });
+    updateImage(id, { status: "processing", error: "", usedKey: "", usedModel: "" });
     try {
       const file = img.handle ? await img.handle.getFile() : img.file;
       const { base64, dataUrl, mimeType } = await fileToDownscaledImage(file);
 
-      // Try every key in rotation, starting at keyIndex, until one succeeds.
-      let meta = null;
-      let lastErr = null;
-      for (let attempt = 0; attempt < keys.length; attempt++) {
-        if (stopRef.current) throw new Error("Stopped");
-        const k = keys[(keyIndex + attempt) % keys.length];
-        try {
-          meta = await generateMetadata({
-            provider,
-            model,
-            apiKey: k,
-            base64,
-            dataUrl,
-            mimeType,
-            prompt,
-          });
-          lastErr = null;
-          break;
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-      if (!meta) throw lastErr || new Error("All API keys failed for this image");
+      const { meta, keyLabel, model } = await generateWithFailover({
+        provider,
+        models,
+        keys,
+        prompt,
+        base64,
+        dataUrl,
+        mimeType,
+        stopRef,
+        onEvent: bumpHealth,
+        signal: abortRef.current?.signal,
+        patient: patientRetry,
+      });
 
       if (img.handle && dirHandleRef.current) {
         try {
@@ -284,9 +359,12 @@ export default function MetaGenerator() {
         title: meta.title,
         description: meta.description,
         keywords: meta.keywords,
+        usedKey: keyLabel,
+        usedModel: model,
       });
 
       // Live-append to the CSV inside the "meta done" folder (folder mode only).
+      // CSV schema is intentionally unchanged — no usedKey/usedModel here.
       doneMapRef.current[id] = {
         name: img.name,
         title: meta.title,
@@ -304,8 +382,8 @@ export default function MetaGenerator() {
       toast.error("Add at least one API key.");
       return;
     }
-    const model = provider === "gemini" ? geminiModel : orModel.trim();
-    if (!model) {
+    const models = effectiveModels;
+    if (!models.length) {
       toast.error("Choose or enter a model.");
       return;
     }
@@ -318,7 +396,11 @@ export default function MetaGenerator() {
     }
 
     stopRef.current = false;
+    abortRef.current = new AbortController();
     setProcessing(true);
+
+    // Probe unknown/cooling keys in the background; does not delay images.
+    if (autoProbe) probeKeys({ all: false });
 
     let cursor = 0;
     const worker = async () => {
@@ -326,7 +408,7 @@ export default function MetaGenerator() {
         if (stopRef.current) return;
         const pos = cursor++;
         if (pos >= queue.length) return;
-        await processOne(queue[pos], parsedKeys, pos % parsedKeys.length, model);
+        await processOne(queue[pos], parsedKeys, models);
       }
     };
 
@@ -334,6 +416,7 @@ export default function MetaGenerator() {
     await Promise.all(Array.from({ length: n }, worker));
 
     setProcessing(false);
+    abortRef.current = null;
     if (stopRef.current)
       toast.info("Stopped. Completed results are ready to download.");
     else toast.success("Processing complete.");
@@ -341,27 +424,35 @@ export default function MetaGenerator() {
 
   const stop = () => {
     stopRef.current = true;
+    abortRef.current?.abort();
     toast.info("Stopping after in-flight images finish…");
   };
 
-  const getModel = () => (provider === "gemini" ? geminiModel : orModel.trim());
+  const ensureAbortController = () => {
+    if (!abortRef.current || abortRef.current.signal.aborted) {
+      abortRef.current = new AbortController();
+    }
+    return abortRef.current;
+  };
 
   const retryImage = async (id) => {
     if (!parsedKeys.length) return toast.error("Add at least one API key.");
-    const model = getModel();
-    const idx = imagesRef.current.findIndex((i) => i.id === id);
-    await processOne(id, parsedKeys, (idx < 0 ? 0 : idx) % parsedKeys.length, model);
+    if (!effectiveModels.length) return toast.error("Choose or enter a model.");
+    stopRef.current = false;
+    ensureAbortController();
+    await processOne(id, parsedKeys, effectiveModels);
   };
 
   const retryFailed = async () => {
     if (!parsedKeys.length) return toast.error("Add at least one API key.");
-    const model = getModel();
+    if (!effectiveModels.length) return toast.error("Choose or enter a model.");
     const ids = imagesRef.current
       .filter((i) => i.status === "error")
       .map((i) => i.id);
     if (!ids.length) return;
 
     stopRef.current = false;
+    ensureAbortController();
     setProcessing(true);
     let cursor = 0;
     const worker = async () => {
@@ -369,15 +460,97 @@ export default function MetaGenerator() {
         if (stopRef.current) return;
         const pos = cursor++;
         if (pos >= ids.length) return;
-        const gid = ids[pos];
-        const idx = imagesRef.current.findIndex((i) => i.id === gid);
-        await processOne(gid, parsedKeys, (idx < 0 ? pos : idx) % parsedKeys.length, model);
+        await processOne(ids[pos], parsedKeys, effectiveModels);
       }
     };
     const n = Math.max(1, Math.min(10, Number(concurrency) || 1));
     await Promise.all(Array.from({ length: n }, worker));
     setProcessing(false);
     toast.success("Retry finished.");
+  };
+
+  const currentModel = () =>
+    provider === "gemini" ? primaryModel : orModel.trim();
+
+  // Probe keys with a tiny text-only request and record the health result.
+  const probeKeys = useCallback(
+    async ({ all = false } = {}) => {
+      const model = provider === "gemini" ? primaryModel : orModel.trim();
+      if (!model || !keyEntries.length) return;
+      const targets = all
+        ? keyEntries
+        : keyEntries.filter(({ hash }) => {
+            const rec = getKey(hash);
+            return (
+              !rec ||
+              rec.status === "unknown" ||
+              rec.status === "cooling" ||
+              rec.status === "degraded"
+            );
+          });
+      await Promise.all(
+        targets.map(async ({ hash, key }) => {
+          const result = await testKey(provider, key, model, {
+            timeoutMs: PING_TIMEOUT_MS,
+            signal: abortRef.current?.signal,
+          });
+          if (result.ok) {
+            recordSuccess(hash, model, result.latencyMs);
+          } else if (result.kind && result.kind !== ErrorKind.STOPPED) {
+            recordFailure(hash, model, result.kind, null, result.message);
+          }
+          bumpHealth();
+        })
+      );
+    },
+    [provider, primaryModel, orModel, keyEntries, bumpHealth]
+  );
+
+  const handleTestKeys = async () => {
+    if (!keyEntries.length) return toast.error("Add at least one API key.");
+    if (!currentModel()) return toast.error("Choose or enter a model.");
+    setTesting(true);
+    ensureAbortController();
+    toast.info(`Testing ${keyEntries.length} key(s)…`);
+    await probeKeys({ all: true });
+    setTesting(false);
+    toast.success("Key test finished.");
+  };
+
+  const handleTestKey = async (entry) => {
+    const model = currentModel();
+    if (!model) return toast.error("Choose or enter a model.");
+    ensureAbortController();
+    const result = await testKey(provider, entry.key, model, {
+      timeoutMs: PING_TIMEOUT_MS,
+      signal: abortRef.current?.signal,
+    });
+    if (result.ok) recordSuccess(entry.hash, model, result.latencyMs);
+    else if (result.kind && result.kind !== ErrorKind.STOPPED)
+      recordFailure(entry.hash, model, result.kind, null, result.message);
+    bumpHealth();
+  };
+
+  const handleResetKey = (hash) => {
+    resetHealthKey(hash);
+    bumpHealth();
+  };
+
+  const handleResetHealth = () => {
+    resetHealthAll();
+    bumpHealth();
+    toast.success("Key health reset.");
+  };
+
+  const handleToggleKey = (hash, enabled) => {
+    setKeyEnabled(hash, enabled);
+    bumpHealth();
+  };
+
+  const toggleFallback = (value) => {
+    setFallbackModels((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]
+    );
   };
 
   const results = useMemo(
@@ -477,7 +650,7 @@ export default function MetaGenerator() {
             <div className="space-y-1.5">
               <Label className="label-tech">Model</Label>
               {provider === "gemini" ? (
-                <Select value={geminiModel} onValueChange={setGeminiModel}>
+                <Select value={primaryModel} onValueChange={setPrimaryModel}>
                   <SelectTrigger
                     data-testid="model-select"
                     className="rounded-none bg-[#0B0B0D] border-white/10 font-mono-tech text-sm"
@@ -516,6 +689,90 @@ export default function MetaGenerator() {
                   </div>
                 </div>
               )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="label-tech">Fallback models (in order)</Label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <span className="font-mono-tech text-[10px] text-[#71717A]">
+                    auto
+                  </span>
+                  <Switch
+                    data-testid="auto-fallback-switch"
+                    checked={autoFallback}
+                    onCheckedChange={setAutoFallback}
+                    className="data-[state=checked]:bg-[#4ADE80] data-[state=unchecked]:bg-[#27272A]"
+                  />
+                </label>
+              </div>
+
+              {provider === "gemini" ? (
+                <div className="space-y-1.5">
+                  {GEMINI_MODELS.filter((m) => m.value !== primaryModel).map((m) => (
+                    <label
+                      key={m.value}
+                      className="flex items-center gap-2 cursor-pointer group"
+                    >
+                      <Checkbox
+                        data-testid={`fallback-model-checkbox-${m.value}`}
+                        checked={fallbackModels.includes(m.value)}
+                        onCheckedChange={() => toggleFallback(m.value)}
+                        className="rounded-none border-white/20 data-[state=checked]:bg-[#FACC15] data-[state=checked]:text-black data-[state=checked]:border-[#FACC15]"
+                      />
+                      <span className="font-mono-tech text-[11px] text-[#A1A1AA] group-hover:text-white transition-colors">
+                        {m.label}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Input
+                    data-testid="or-fallback-input"
+                    value={orFallbackText}
+                    onChange={(e) => setOrFallbackText(e.target.value)}
+                    placeholder="openai/gpt-4o, anthropic/claude-3.5-sonnet"
+                    className="rounded-none bg-[#0B0B0D] border-white/10 font-mono-tech text-xs focus-visible:ring-1 focus-visible:ring-white"
+                  />
+                  <p className="text-[#71717A] text-[10px] font-mono-tech">
+                    Comma separated. Tried in order after the primary.
+                  </p>
+                </div>
+              )}
+
+              <div
+                data-testid="model-chain-readout"
+                className="font-mono-tech text-[10px] text-[#71717A] border border-white/10 px-2 py-1.5 break-all"
+                title="Effective model chain"
+              >
+                <span className="text-[#52525b]">chain/ </span>
+                {effectiveModels.length ? effectiveModels.join(" → ") : "—"}
+              </div>
+
+              <label className="flex items-center gap-2 cursor-pointer pt-0.5">
+                <Switch
+                  data-testid="auto-probe-switch"
+                  checked={autoProbe}
+                  onCheckedChange={setAutoProbe}
+                  className="data-[state=checked]:bg-[#4ADE80] data-[state=unchecked]:bg-[#27272A]"
+                />
+                <span className="font-mono-tech text-[10px] text-[#71717A]">
+                  Probe unknown keys on start
+                </span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer pt-0.5">
+                <Switch
+                  data-testid="patient-retry-switch"
+                  checked={patientRetry}
+                  onCheckedChange={setPatientRetry}
+                  className="data-[state=checked]:bg-[#4ADE80] data-[state=unchecked]:bg-[#27272A]"
+                />
+                <span className="font-mono-tech text-[10px] text-[#71717A]">
+                  Wait out rate limits and keep retrying (free-tier)
+                </span>
+              </label>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -633,6 +890,20 @@ export default function MetaGenerator() {
                 <FileText size={15} /> TXT
               </Button>
             </div>
+          </section>
+
+          {/* Key health */}
+          <section className="md:col-span-12 bg-[#18181B] p-5">
+            <KeyHealthPanel
+              entries={keyEntries}
+              version={healthVersion}
+              testing={testing}
+              onTestAll={handleTestKeys}
+              onResetAll={handleResetHealth}
+              onResetKey={handleResetKey}
+              onTestKey={handleTestKey}
+              onToggle={handleToggleKey}
+            />
           </section>
         </div>
 
@@ -776,6 +1047,201 @@ export default function MetaGenerator() {
   );
 }
 
+const KEY_STATUS_META = {
+  healthy: { label: "healthy", color: "#4ADE80" },
+  degraded: { label: "degraded", color: "#FACC15" },
+  cooling: { label: "cooling", color: "#FACC15" },
+  invalid: { label: "invalid", color: "#F87171" },
+  disabled: { label: "disabled", color: "#71717A" },
+  unknown: { label: "unknown", color: "#52525b" },
+};
+
+function formatCountdown(ms) {
+  if (!(ms > 0)) return "";
+  const total = Math.ceil(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Isolated from the root component so a 1s cooldown tick does not re-render
+// the whole results table on large batches.
+const KeyHealthPanel = memo(function KeyHealthPanel({
+  entries,
+  version,
+  testing,
+  onTestAll,
+  onResetAll,
+  onResetKey,
+  onTestKey,
+  onToggle,
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const snap = healthSnapshot();
+  const rows = entries.map((e) => ({
+    ...e,
+    rec: snap.keys.find((r) => r.hash === e.hash) || null,
+  }));
+
+  const anyCooldown = rows.some(
+    ({ rec }) =>
+      rec && Object.values(rec.cooldowns || {}).some((until) => until > now)
+  );
+
+  useEffect(() => {
+    if (!anyCooldown) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [anyCooldown, version]);
+
+  return (
+    <div data-version={version}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 label-tech">
+          <ShieldCheck size={14} /> Key Health
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            data-testid="test-keys-button"
+            onClick={onTestAll}
+            disabled={testing || !entries.length}
+            className="flex items-center gap-1.5 text-[#FACC15] hover:text-white text-xs font-mono-tech transition-colors disabled:opacity-40"
+            style={{ transition: "color .15s ease" }}
+          >
+            {testing ? (
+              <CircleNotch size={13} weight="bold" className="animate-spin" />
+            ) : (
+              <Pulse size={13} weight="bold" />
+            )}
+            Test keys
+          </button>
+          <button
+            data-testid="reset-health-button"
+            onClick={onResetAll}
+            disabled={!entries.length}
+            className="flex items-center gap-1.5 text-[#71717A] hover:text-white text-xs font-mono-tech transition-colors disabled:opacity-40"
+            style={{ transition: "color .15s ease" }}
+          >
+            <ArrowCounterClockwise size={13} /> Reset health
+          </button>
+        </div>
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="font-mono-tech text-xs text-[#52525b]">
+          Paste API keys above to see health.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <div className="flex items-center gap-3 font-mono-tech text-[10px] text-[#52525b] px-1 pb-1 min-w-[720px]">
+            <span className="w-3" />
+            <span className="w-28">KEY</span>
+            <span className="w-20">STATUS</span>
+            <span className="w-20">PASS/FAIL</span>
+            <span className="w-16">LATENCY</span>
+            <span className="w-20">COOLDOWN</span>
+            <span className="flex-1">LAST ERROR</span>
+            <span className="w-24" />
+            <span className="w-10" />
+          </div>
+          {rows.map(({ hash, label, rec, key }) => {
+            const cooldownRemaining = rec
+              ? Math.max(
+                  0,
+                  ...Object.values(rec.cooldowns || {}).map((until) => until - now),
+                  -1
+                )
+              : 0;
+            const status = rec?.status || "unknown";
+            const displayStatus =
+              cooldownRemaining > 0 &&
+              status !== "invalid" &&
+              status !== "disabled"
+                ? "cooling"
+                : status;
+            const meta = KEY_STATUS_META[displayStatus] || KEY_STATUS_META.unknown;
+            const enabled = status !== "disabled" && status !== "invalid";
+            const errTitle = rec?.lastErrorKind
+              ? `${rec.lastErrorKind}${rec.lastError ? `: ${rec.lastError}` : ""}`
+              : "No errors";
+
+            return (
+              <div
+                key={hash}
+                data-testid={`key-health-row-${hash}`}
+                className="flex items-center gap-3 font-mono-tech text-[11px] border-t border-white/10 py-2 min-w-[720px]"
+              >
+                <span
+                  className="w-3 flex justify-center"
+                  style={{ color: meta.color }}
+                >
+                  {enabled ? (
+                    <Circle size={8} weight="fill" />
+                  ) : (
+                    <XCircle size={11} weight="fill" />
+                  )}
+                </span>
+                <span
+                  className="w-28 truncate text-[#E4E4E7]"
+                  title={label}
+                >
+                  {label}
+                </span>
+                <span
+                  data-testid={`key-status-${hash}`}
+                  className="w-20 truncate"
+                  style={{ color: meta.color }}
+                >
+                  {meta.label}
+                </span>
+                <span className="w-20 text-[#A1A1AA]">
+                  ✓{rec?.successCount || 0} / ✗{rec?.failCount || 0}
+                </span>
+                <span className="w-16 text-[#71717A]">
+                  {rec?.avgLatencyMs ? `${rec.avgLatencyMs}ms` : "—"}
+                </span>
+                <span className="w-20 text-[#FACC15]">
+                  {cooldownRemaining > 0
+                    ? formatCountdown(cooldownRemaining)
+                    : ""}
+                </span>
+                <span
+                  className="flex-1 truncate text-[#52525b]"
+                  title={errTitle}
+                >
+                  {rec?.lastErrorKind || ""}
+                </span>
+                <button
+                  data-testid={`key-test-${hash}`}
+                  onClick={() => onTestKey({ hash, key, label })}
+                  className="w-24 text-[10px] text-[#A1A1AA] hover:text-white border border-white/10 hover:border-white/40 px-1.5 py-0.5 transition-colors"
+                  style={{ transition: "color .15s ease, border-color .15s ease" }}
+                >
+                  test
+                </button>
+                <button
+                  data-testid={`key-reset-${hash}`}
+                  onClick={() => onResetKey(hash)}
+                  className="w-10 text-[10px] text-[#71717A] hover:text-white transition-colors"
+                  title="Reset this key"
+                >
+                  <ArrowCounterClockwise size={12} />
+                </button>
+                <Switch
+                  data-testid={`key-toggle-${hash}`}
+                  checked={enabled}
+                  onCheckedChange={(v) => onToggle(hash, v)}
+                  className="data-[state=checked]:bg-[#4ADE80] data-[state=unchecked]:bg-[#27272A]"
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+});
+
 function StatusBadge({ status, error }) {
   if (status === "done")
     return (
@@ -826,6 +1292,14 @@ function ResultRow({ img, index, onRetry }) {
         <div className="mt-1 text-[11px]">
           <StatusBadge status={img.status} error={img.error} />
         </div>
+        {img.status === "done" && (img.usedKey || img.usedModel) && (
+          <div className="mt-1 font-mono-tech text-[10px] text-[#71717A] truncate">
+            {img.usedKey}
+            {img.usedKey && img.usedModel ? " · " : ""}
+            {img.usedModel}
+            <span data-testid={`used-by-${index}`} className="hidden" />
+          </div>
+        )}
         {img.status === "error" && (
           <>
             <div className="mt-1 text-[10px] text-[#F87171]/70 line-clamp-2 break-all">
