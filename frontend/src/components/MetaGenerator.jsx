@@ -65,16 +65,9 @@ import {
 } from "@/lib/fsUtils";
 import { buildCSV, buildTXT, downloadFile, firstCsvField } from "@/lib/exporters";
 
-// Selectable Gemini model IDs. IDs that a given API key/version does not serve
-// return 404 and are auto-skipped by the failover engine, so the list can stay
-// generous. Update it as models are added/retired by Google.
+// Real Generative Language API model IDs. Unavailable models are skipped
+// automatically by the failover engine, but keep this list maintained.
 const GEMINI_MODELS = [
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
-  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
-  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite" },
-  { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite" },
-  { value: "gemini-3.1-flash-lite-image", label: "Gemini 3.1 Flash Lite Image" },
   { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
   { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
   { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
